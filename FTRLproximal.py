@@ -1,4 +1,5 @@
 from __future__ import division
+from collections import deque
 
 import numpy as np
 
@@ -26,7 +27,7 @@ class FTRLProximal(object):
     [1][http://static.googleusercontent.com/media/research.google.com/en//pubs/archive/41159.pdf]
     [2][http://jmlr.org/proceedings/papers/v15/mcmahan11b/mcmahan11b.pdf]
     """
-    def __init__(self, alpha=1., beta=1., l1=0., l2=0.):
+    def __init__(self, alpha=1., beta=1., l1=0., l2=0., history_len=None):
         """
         :param alpha: Parameter used to control scaling of per-weight learning rates. (Default 1.0)
                       Can be loosely thought of as a learning rate in Gradient Descent.
@@ -45,7 +46,7 @@ class FTRLProximal(object):
         self._z = {}
         self._n = {}
         self._round = 0
-        self._history = []
+        self._history = deque(maxlen=history_len)
         self._bias = 0
         self._nbias = 0
 
@@ -61,13 +62,17 @@ class FTRLProximal(object):
         """
         :returns: The learned coefficients of the model
         """
+        return self._weights(self._z.keys())
+
+    def _weights(self, keys):
         w = {}
         a = self.alpha
         b = self.beta
         n = self._n
         l1 = self.l1
         l2 = self.l2
-        for k, zi in self._z.iteritems():
+        for k in keys:
+            zi = self._z.get(k, 0)
             if np.abs(zi) <= l1:
                 w[k] = 0
             else:
@@ -104,7 +109,7 @@ class FTRLProximal(object):
         :param y: the binary classification label for x
         :returns: self
         """
-        w = self.weights
+        w = self._weights(x.keys())
         pred = self._predict(x, w)
         self._update(x, y, pred, w)
         self._history.append((pred, y))
