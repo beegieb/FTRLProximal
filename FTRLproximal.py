@@ -15,6 +15,24 @@ def sigmoid(x):
     return 1/(1 + np.exp(-x))
 
 
+class HistoryWriter(object):
+    def __init__(self, save_file=None, maxlen=None):
+        self._save_file = save_file
+        self._history = deque(maxlen=maxlen)
+
+    def append(self, o):
+        if self._save_file is not None:
+            self._write_history(o)
+        self._history.append(o)
+
+    def _write_history(self, o):
+        with open(self._save_file, 'aw') as outfile:
+            try:
+                outfile.write('\t'.join(str(oi) for oi in o) + '\n')
+            except TypeError:
+                outfile.write(str(o))
+
+
 class FTRLProximal(object):
     """
     A pure python implementation of the FTRLProximal algorithm described in
@@ -27,7 +45,7 @@ class FTRLProximal(object):
     [1][http://static.googleusercontent.com/media/research.google.com/en//pubs/archive/41159.pdf]
     [2][http://jmlr.org/proceedings/papers/v15/mcmahan11b/mcmahan11b.pdf]
     """
-    def __init__(self, alpha=1., beta=1., l1=0., l2=0., history_len=None):
+    def __init__(self, alpha=1., beta=1., l1=0., l2=0., lam=1., history_len=None, history_file=None):
         """
         :param alpha: Parameter used to control scaling of per-weight learning rates. (Default 1.0)
                       Can be loosely thought of as a learning rate in Gradient Descent.
@@ -38,17 +56,42 @@ class FTRLProximal(object):
                      denominator. Leaving this at 1.0 should be good enough.
         :param l1: The magnitude of L1 regularization (Default 0.0)
         :param l2: The magnitude of L2 regularization (Default 0.0)
+        :param lam: The probability that a new feature will be included when encountered
+                    Concretely, if a new feature is observed, it is added to the model with probability lam
+        :param history_len: what is the maximum length of history to maintain in memory
+        :param history_file: if not None, will write update history to the filename provided
         """
         self.alpha = alpha
         self.beta = beta
-        self.l1 = l1
-        self.l2 = l2
+        self._l1 = l1
+        self._l2 = l2
+        self.lam = lam
         self._z = {}
         self._n = {}
         self._round = 0
-        self._history = deque(maxlen=history_len)
+        self._history = HistoryWriter(save_file=history_file, maxlen=history_len)
         self._bias = 0
         self._nbias = 0
+        self._use_cached_weights = False
+        self._cached_weights = {}
+
+    @property
+    def l1(self):
+        return self._l1
+
+    @l1.setter
+    def l1(self, new):
+        self._l1 = new
+        self._use_cached_weights = False
+
+    @property
+    def l2(self):
+        return self._l2
+
+    @l2.setter
+    def l2(self, new):
+        self._l2 = new
+        self._use_cached_weights = False
 
     @property
     def bias(self):
@@ -62,7 +105,10 @@ class FTRLProximal(object):
         """
         :returns: The learned coefficients of the model
         """
-        return self._weights(self._z.keys())
+        if not self._use_cached_weights:
+            self._cached_weights = self._weights(self._z.keys())
+            self._use_cached_weights = True
+        return self._cached_weights
 
     def _weights(self, keys):
         w = {}
@@ -73,9 +119,7 @@ class FTRLProximal(object):
         l2 = self.l2
         for k in keys:
             zi = self._z.get(k, 0)
-            if np.abs(zi) <= l1:
-                w[k] = 0
-            else:
+            if np.abs(zi) > l1:
                 w[k] = -(zi - l1 * np.sign(zi)) / (l2 + (b + np.sqrt(n[k])) / a)
         return w
 
@@ -100,7 +144,7 @@ class FTRLProximal(object):
         else:
             return self._predict(x, w)
 
-    def fit(self, x, y):
+    def fit(self, x, y, pred=None, weights=None):
         """
         Fit the model on an x, y datapoint pair
         :param x: a sparse dict with format {'feature1_name': value, ...}
@@ -109,15 +153,19 @@ class FTRLProximal(object):
         :param y: the binary classification label for x
         :returns: self
         """
-        w = self._weights(x.keys())
-        pred = self._predict(x, w)
-        self._update(x, y, pred, w)
-        self._history.append((pred, y))
+        weights = self._weights(x.keys()) if weights is None else weights
+        pred = self._predict(x, weights) if pred is None else pred
+        score = self.uncertainty_score(x)
+
+        self._update(x, y, pred, weights)
+        self._history.append((x, pred, y, score))
         return self
 
     def _update(self, x, y, p, w):
         err = p - y
         for k, xi in x.iteritems():
+            if k not in self._z and np.random.rand() > self.lam:
+                continue
             gi = err*xi
             gg = gi**2
             ni = self._n.get(k, 0)
@@ -126,7 +174,8 @@ class FTRLProximal(object):
             self._n[k] = self._n.get(k, 0) + gg
         self._bias -= self.alpha * err / (self.beta + np.sqrt(self._nbias))
         self._nbias += err**2
-        self._round += 1
+        self._round = 1
+        self._use_cached_weights = False
 
     def uncertainty_score(self, x):  # This is a work in progress
         """
@@ -140,8 +189,9 @@ class FTRLProximal(object):
         :param x: a dict representation of the datapoint
         :returns: an uncertainty score of the prediction
         """
-        return self.alpha * sum(np.abs(v) / np.sqrt(self._n.get(k, 0))
-                                for k, v in x.iteritems())
+
+        return sum(np.abs(v) / np.sqrt(self._n.get(k, 0))
+                   for k, v in x.iteritems() if k in self._n)
 
 
 class FTRLProximalSVM(FTRLProximal):
